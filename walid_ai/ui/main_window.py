@@ -30,11 +30,7 @@ from walid_ai.config import DB_PATH, MODEL, OLLAMA_URL, SYSTEM_PROMPT
 from walid_ai.memory.database import DatabaseManager
 from walid_ai.tools.filesystem import files, read
 from walid_ai.tools.indexer import FileIndexer
-
-try:
-    from walid_ai.agent.controller import AgentController
-except ImportError:
-    AgentController = None
+from walid_ai.agent.controller import AgentController
 
 try:
     import sounddevice as sd
