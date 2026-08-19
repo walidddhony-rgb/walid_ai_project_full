@@ -1,4 +1,4 @@
-"""SQLite database layer for Walid AI."""
+"""SQLite persistence layer with FTS5-backed knowledge retrieval."""
 from __future__ import annotations
 
 import sqlite3
@@ -7,7 +7,9 @@ from typing import Any
 
 
 class DatabaseManager:
-    def __init__(self, path: Path):
+    """Stores chat history, indexed files, operations, preferences, and knowledge."""
+
+    def __init__(self, path: str | Path):
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
@@ -49,83 +51,8 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS memory (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
-                    category TEXT DEFAULT 'general'
+                    category TEXT DEFAULT 'general',
+                    updated DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
-                """
-            )
 
-    def add_message(self, role: str, content: str) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "INSERT INTO conversations(role, content) VALUES(?, ?)",
-                (role, content),
-            )
-
-    def history(self, limit: int = 12) -> list[dict[str, str]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT role, content FROM conversations ORDER BY id DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-
-        return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
-
-    def clear_history(self) -> None:
-        with self._connect() as conn:
-            conn.execute("DELETE FROM conversations")
-
-    def log(self, op: str, target: str = "", details: str = "", status: str = "success") -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO operations(operation, target, details, status)
-                VALUES(?, ?, ?, ?)
-                """,
-                (op, target, details, status),
-            )
-
-    def upsert(self, data: tuple[str, str, int, str, str]) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO files(path, absolute, size, hash, preview, updated)
-                VALUES(?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                ON CONFLICT(path) DO UPDATE SET
-                    absolute=excluded.absolute,
-                    size=excluded.size,
-                    hash=excluded.hash,
-                    preview=excluded.preview,
-                    updated=CURRENT_TIMESTAMP
-                """,
-                data,
-            )
-
-    def get_file(self, rel_path: str) -> dict[str, Any] | None:
-        with self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM files WHERE path = ?",
-                (rel_path,),
-            ).fetchone()
-
-        return dict(row) if row else None
-
-    def set_memory(self, key: str, value: str, category: str = "general") -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO memory(key, value, category)
-                VALUES(?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value=excluded.value,
-                    category=excluded.category
-                """,
-                (key, value, category),
-            )
-
-    def get_all_memory(self) -> list[dict[str, str]]:
-        with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT key, value, category FROM memory ORDER BY key"
-            ).fetchall()
-
-        return [dict(row) for row in rows]
+                CREATE TABLE IF 
