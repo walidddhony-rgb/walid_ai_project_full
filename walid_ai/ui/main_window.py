@@ -10,27 +10,17 @@ import requests
 from PySide6.QtCore import QObject, QThread, Qt, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QTextOption
 from PySide6.QtWidgets import (
-    QApplication,
-    QFileDialog,
-    QHBoxLayout,
-    QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMainWindow,
-    QMessageBox,
-    QPushButton,
-    QTextBrowser,
-    QTextEdit,
-    QVBoxLayout,
-    QWidget,
+    QApplication, QFileDialog, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
+    QTextBrowser, QTextEdit, QVBoxLayout, QWidget,
 )
 
+from walid_ai.agent.controller import AgentController
 from walid_ai.config import DB_PATH, MODEL, OLLAMA_URL, SYSTEM_PROMPT
 from walid_ai.memory.database import DatabaseManager
+from walid_ai.services.memory_service import MemoryService
 from walid_ai.tools.filesystem import files, read
 from walid_ai.tools.indexer import FileIndexer
-from walid_ai.agent.controller import AgentController
-from walid_ai.services.memory_service import MemoryService
 
 try:
     import sounddevice as sd
@@ -65,8 +55,7 @@ class AutoGrowTextEdit(QTextEdit):
         self.adjust_height()
 
     def adjust_height(self) -> None:
-        document_height = self.document().size().height()
-        height = max(46, min(int(document_height + 24), 180))
+        height = max(46, min(int(self.document().size().height() + 24), 180))
         self.setFixedHeight(height)
         self.height_changed.emit(height)
 
@@ -95,15 +84,10 @@ class AttachmentPanel(QWidget):
 
     def choose(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self,
-            "إرفاق ملفات أو صور",
-            "",
-            (
-                "كل الملفات (*);;"
-                "الصور (*.png *.jpg *.jpeg *.bmp *.webp);;"
-                "المستندات (*.pdf *.docx *.xlsx *.csv *.txt *.md);;"
-                "الأكواد (*.py *.js *.ts *.html *.css *.sql)"
-            ),
+            self, "إرفاق ملفات أو صور", "",
+            "كل الملفات (*);;الصور (*.png *.jpg *.jpeg *.bmp *.webp);;"
+            "المستندات (*.pdf *.docx *.xlsx *.csv *.txt *.md);;"
+            "الأكواد (*.py *.js *.ts *.html *.css *.sql)",
         )
         for raw_path in paths:
             path = Path(raw_path)
@@ -117,11 +101,11 @@ class AttachmentPanel(QWidget):
 
     def add_path(self, path: Path) -> None:
         self.paths.append(path)
-        item = QListWidgetItem(f"\U0001f4ce {path.name}")
+        item = QListWidgetItem(f"📎 {path.name}")
         self.file_list.addItem(item)
-        remove_button = QPushButton("\u00d7")
-        remove_button.clicked.connect(lambda: self.remove(path))
-        self.file_list.setItemWidget(item, remove_button)
+        button = QPushButton("×")
+        button.clicked.connect(lambda: self.remove(path))
+        self.file_list.setItemWidget(item, button)
         self.file_list.setVisible(True)
 
     def remove(self, path: Path) -> None:
@@ -155,7 +139,7 @@ class ChatWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        full: list[str] = []
+        pieces: list[str] = []
         try:
             response = requests.post(
                 OLLAMA_URL,
@@ -170,11 +154,12 @@ class ChatWorker(QObject):
             )
             if response.status_code >= 400:
                 try:
-                    details = response.json()
+                    detail = response.json()
                 except ValueError:
-                    details = response.text
-                self.failed.emit(f"Ollama HTTP {response.status_code}: {details}")
+                    detail = response.text
+                self.failed.emit(f"Ollama HTTP {response.status_code}: {detail}")
                 return
+
             for line in response.iter_lines(decode_unicode=True):
                 if not line:
                     continue
@@ -184,11 +169,11 @@ class ChatWorker(QObject):
                     return
                 piece = payload.get("message", {}).get("content", "")
                 if piece:
-                    full.append(piece)
+                    pieces.append(piece)
                     self.token.emit(piece)
                 if payload.get("done"):
                     break
-            self.finished.emit("".join(full).strip())
+            self.finished.emit("".join(pieces).strip())
         except requests.exceptions.ConnectionError:
             self.failed.emit("لا يمكن الاتصال بـ Ollama. شغّل: ollama serve")
         except requests.exceptions.Timeout:
@@ -209,35 +194,35 @@ class ResearchWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            params = {"search": self.query, "per-page": 8}
-            if self.academic:
-                params["sort"] = "relevance_score:desc"
             response = requests.get(
                 "https://api.openalex.org/works",
-                params=params,
+                params={
+                    "search": self.query,
+                    "per-page": 8,
+                    "sort": "relevance_score:desc",
+                },
                 timeout=30,
             )
             response.raise_for_status()
-            data = response.json()
-            results = data.get("results", [])
+            results = response.json().get("results", [])
+            label = "أكاديمية" if self.academic else "ويب"
             if not results:
-                label = "أكاديمية" if self.academic else "ويب"
                 self.finished.emit(f"لم توجد نتائج {label} لـ: {self.query}")
                 return
-            label = "أكاديمية" if self.academic else "ويب"
-            lines = [f"## نتائج البحث {label}: {self.query}\n"]
+
+            lines = [f"## نتائج البحث {label}: {self.query}", ""]
             for item in results:
-                title = item.get("title", "بدون عنوان")
-                year = item.get("publication_year", "")
-                doi = item.get("doi") or item.get("primary_location", {}).get("landing_page_url", "")
+                title = item.get("title") or "بدون عنوان"
+                year = item.get("publication_year")
                 citations = item.get("cited_by_count", 0)
+                location = item.get("primary_location") or {}
+                url = item.get("doi") or location.get("landing_page_url") or ""
                 lines.append(f"### {title}")
                 if year:
                     lines.append(f"**السنة:** {year}")
-                if citations:
-                    lines.append(f"**الاستشهادات:** {citations}")
-                if doi:
-                    lines.append(f"**الرابط:** {doi}")
+                lines.append(f"**الاستشهادات:** {citations}")
+                if url:
+                    lines.append(f"**الرابط:** {url}")
                 lines.append("")
             self.finished.emit("\n".join(lines))
         except Exception as exc:
@@ -252,7 +237,6 @@ class VoiceWorker(QObject):
         super().__init__()
         self._stop = False
         self._audio_data: list = []
-        self._recording = False
 
     def request_stop(self) -> None:
         self._stop = True
@@ -265,12 +249,12 @@ class VoiceWorker(QObject):
                 "python -m pip install faster-whisper sounddevice numpy"
             )
             return
+
         temporary_path = None
         try:
             sample_rate = 16000
             self._audio_data = []
             self._stop = False
-            self._recording = True
 
             def callback(indata, frames, time_info, status):
                 if self._stop:
@@ -288,30 +272,39 @@ class VoiceWorker(QObject):
                 sd.sleep(100)
             stream.stop()
             stream.close()
-            self._recording = False
 
             if not self._audio_data:
                 self.finished.emit("")
                 return
+
             audio = np.concatenate(self._audio_data, axis=0)
             if len(audio) < sample_rate * 0.3:
                 self.finished.emit("")
                 return
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temporary_path = f.name
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp:
+                temporary_path = temp.name
+
             with wave.open(temporary_path, "wb") as wav_file:
                 wav_file.setnchannels(1)
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(sample_rate)
-                pcm = np.clip(audio.flatten() * 32767, -32768, 32767).astype(np.int16)
+                pcm = np.clip(
+                    audio.flatten() * 32767,
+                    -32768,
+                    32767,
+                ).astype(np.int16)
                 wav_file.writeframes(pcm.tobytes())
+
             model = WhisperModel("base", device="cpu", compute_type="int8")
             segments, _ = model.transcribe(
                 temporary_path,
                 language="ar",
                 vad_filter=True,
             )
-            self.finished.emit(" ".join(s.text for s in segments).strip())
+            self.finished.emit(
+                " ".join(segment.text for segment in segments).strip()
+            )
         except Exception as exc:
             self.failed.emit(f"خطأ في الميكروفون أو التعرف الصوتي: {exc}")
         finally:
@@ -335,7 +328,7 @@ class SpeechEngine:
         return self.engine is not None
 
     def speak(self, text: str) -> None:
-        if not self.engine:
+        if self.engine is None:
             return
 
         def worker() -> None:
@@ -387,7 +380,9 @@ class ChatBubble(QWidget):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self.browser.setLineWrapMode(QTextBrowser.LineWrapMode.WidgetWidth)
-        self.browser.setWordWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        self.browser.setWordWrapMode(
+            QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere
+        )
         layout.addWidget(self.browser)
         self.update_height()
 
@@ -397,13 +392,14 @@ class ChatBubble(QWidget):
         self.update_height()
 
     def update_height(self) -> None:
-        viewport_width = self.browser.viewport().width()
-        if viewport_width <= 0:
-            viewport_width = 600
+        width = self.browser.viewport().width()
+        if width <= 0:
+            width = 600
         document = self.browser.document()
-        document.setTextWidth(max(200, viewport_width - 20))
-        height = max(30, min(int(document.size().height()) + 60, 430))
-        self.browser.setFixedHeight(height)
+        document.setTextWidth(max(200, width - 20))
+        self.browser.setFixedHeight(
+            max(30, min(int(document.size().height()) + 60, 430))
+        )
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -413,25 +409,19 @@ class ChatBubble(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
         self.db = DatabaseManager(DB_PATH)
         self.memory_service = MemoryService(self.db)
-
         self.root: Path | None = None
         self.agent = AgentController(self.db)
         self.thread: QThread | None = None
         self.worker: QObject | None = None
-
         self.busy = False
         self.streaming_text = ""
         self.streaming_bubble: ChatBubble | None = None
         self.current_user_query = ""
-
         self.speech = SpeechEngine()
         self.speak_enabled = False
-
         self.pending_plan = None
-
         self.is_recording = False
         self.voice_thread: QThread | None = None
         self.voice_worker: VoiceWorker | None = None
@@ -446,16 +436,16 @@ class MainWindow(QMainWindow):
             "مرحباً! أنا Walid AI Developer Agent.\n\n"
             "أستطيع تحليل وتطوير مشاريعك بأمان.\n\n"
             "اكتب طلبك أو استخدم الميكروفون.\n"
-            "اضغط \U0001f3a4 لبدء التسجيل واضغط \u23f\ufe0f لإيقافه وإرساله.",
+            "اضغط 🎤 لبدء التسجيل واضغط ⏹️ لإيقافه وإرساله.",
         )
 
     def build_ui(self) -> None:
         central = QWidget()
-        root_layout = QHBoxLayout(central)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
-        root_layout.addWidget(self.build_sidebar())
-        root_layout.addWidget(self.build_chat_area(), 1)
+        layout = QHBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.build_sidebar())
+        layout.addWidget(self.build_chat_area(), 1)
         self.setCentralWidget(central)
 
     def build_sidebar(self) -> QWidget:
@@ -466,30 +456,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
 
-        brand = QLabel("\u2726 Walid AI")
+        brand = QLabel("✦ Walid AI")
         brand.setObjectName("brand")
         layout.addWidget(brand)
 
         buttons = [
-            ("\uff0b محادثة جديدة", self.new_chat),
-            ("\U0001f4c1 مساحة العمل", self.choose_folder),
-            ("\u27f3 فهرسة الملفات", self.index_workspace),
-            ("\U0001f4cb نسخ المحادثة كاملة", self.copy_all_chat),
+            ("＋ محادثة جديدة", self.new_chat),
+            ("📁 مساحة العمل", self.choose_folder),
+            ("⟳ فهرسة الملفات", self.index_workspace),
+            ("📋 نسخ المحادثة كاملة", self.copy_all_chat),
         ]
         for text, callback in buttons:
             button = QPushButton(text)
             button.clicked.connect(callback)
             layout.addWidget(button)
 
-        web_btn = QPushButton("\U0001f310 بحث الويب")
-        web_btn.clicked.connect(lambda: self.start_research(False))
-        layout.addWidget(web_btn)
+        web_button = QPushButton("🌐 بحث الويب")
+        web_button.clicked.connect(lambda: self.start_research(False))
+        layout.addWidget(web_button)
 
-        acad_btn = QPushButton("\U0001f393 بحث أكاديمي")
-        acad_btn.clicked.connect(lambda: self.start_research(True))
-        layout.addWidget(acad_btn)
+        academic_button = QPushButton("🎓 بحث أكاديمي")
+        academic_button.clicked.connect(lambda: self.start_research(True))
+        layout.addWidget(academic_button)
 
-        self.speech_button = QPushButton("\U0001f50a نطق الردود")
+        self.speech_button = QPushButton("🔊 نطق الردود")
         self.speech_button.setCheckable(True)
         self.speech_button.setEnabled(self.speech.available)
         self.speech_button.toggled.connect(self.toggle_speech)
@@ -521,7 +511,7 @@ class MainWindow(QMainWindow):
         title.setObjectName("pageTitle")
         header_layout.addWidget(title)
         header_layout.addStretch()
-        self.status_label = QLabel("\u25cf جاهز")
+        self.status_label = QLabel("● جاهز")
         self.status_label.setObjectName("status")
         header_layout.addWidget(self.status_label)
         layout.addWidget(header)
@@ -562,9 +552,11 @@ class MainWindow(QMainWindow):
         self.input.setObjectName("chatInput")
         input_row.addWidget(self.input, 1)
 
-        self.voice_button = QPushButton("\U0001f3a4")
+        self.voice_button = QPushButton("🎤")
         self.voice_button.setObjectName("voiceButton")
-        self.voice_button.setToolTip("اضغط لبدء التسجيل، واضغط مرة أخرى للإيقاف والإرسال")
+        self.voice_button.setToolTip(
+            "اضغط لبدء التسجيل، واضغط مرة أخرى للإيقاف والإرسال"
+        )
         self.voice_button.setCheckable(True)
         self.voice_button.clicked.connect(self.toggle_voice_recording)
         self.voice_button.setEnabled(
@@ -572,7 +564,7 @@ class MainWindow(QMainWindow):
         )
         input_row.addWidget(self.voice_button)
 
-        self.send_button = QPushButton("إرسال \u27a4")
+        self.send_button = QPushButton("إرسال ➤")
         self.send_button.setObjectName("sendButton")
         self.send_button.clicked.connect(self.send_message)
         input_row.addWidget(self.send_button)
@@ -597,7 +589,7 @@ class MainWindow(QMainWindow):
 
     def copy_message(self, _role: str, text: str) -> None:
         QApplication.clipboard().setText(text)
-        self.status_label.setText("\u25cf تم النسخ")
+        self.status_label.setText("● تم النسخ")
 
     def copy_all_chat(self) -> None:
         messages = self.db.history(limit=10000)
@@ -608,16 +600,16 @@ class MainWindow(QMainWindow):
             for item in messages
         )
         QApplication.clipboard().setText(text)
-        self.status_label.setText("\u25cf تم نسخ المحادثة")
+        self.status_label.setText("● تم نسخ المحادثة")
 
     def on_attachments_changed(self) -> None:
         count = len(self.attachments.values())
-        self.status_label.setText(f"\u25cf {count} مرفق" if count else "\u25cf جاهز")
+        self.status_label.setText(f"● {count} مرفق" if count else "● جاهز")
 
     def build_attachment_context(self, paths: list[Path]) -> list[dict]:
         text_extensions = {
-            ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css",
-            ".scss", ".sql", ".json", ".yaml", ".yml", ".md", ".txt", ".csv",
+            ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss",
+            ".sql", ".json", ".yaml", ".yml", ".md", ".txt", ".csv",
         }
         image_extensions = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
         context = []
@@ -655,8 +647,10 @@ class MainWindow(QMainWindow):
                 timeout=5,
             )
             response.raise_for_status()
-            models = response.json().get("models", [])
-            names = [item.get("name", "") for item in models]
+            names = [
+                item.get("name", "")
+                for item in response.json().get("models", [])
+            ]
             if names and MODEL not in names and not any(
                 name.startswith(MODEL.split(":")[0]) for name in names
             ):
@@ -679,7 +673,6 @@ class MainWindow(QMainWindow):
             return
 
         self.current_user_query = text
-
         attached_paths = self.attachments.values()
         self.input.clear()
         self.input.adjust_height()
@@ -697,8 +690,9 @@ class MainWindow(QMainWindow):
         self.set_busy(True)
 
         try:
-            memory_context = self.memory_service.build_context(text)
-            memory_prompt = memory_context.as_prompt_block()
+            memory_prompt = self.memory_service.build_context(
+                text
+            ).as_prompt_block()
         except Exception as exc:
             memory_prompt = ""
             self.db.log(
@@ -739,21 +733,16 @@ class MainWindow(QMainWindow):
             + "\n\nPROJECT_CONTEXT:\n"
             + json.dumps(payload, ensure_ascii=False)
         )
-
         if memory_prompt:
             system_content += "\n\n" + memory_prompt
 
         messages = [
-            {
-                "role": "system",
-                "content": system_content,
-            },
+            {"role": "system", "content": system_content},
             *self.db.history(limit=10),
         ]
 
         self.streaming_text = ""
         self.streaming_bubble = self.add_message("assistant", "")
-
         self.thread = QThread()
         self.worker = ChatWorker(messages)
         self.worker.moveToThread(self.thread)
@@ -779,12 +768,13 @@ class MainWindow(QMainWindow):
             return
         if self.busy:
             return
+
         self.input.clear()
         self.input.adjust_height()
         label = "أكاديمي" if academic else "ويب"
         self.add_message("user", f"بحث {label}: {query}")
         self.set_busy(True)
-        self.status_label.setText(f"\u25cf يبحث {label}...")
+        self.status_label.setText(f"● يبحث {label}...")
 
         self.thread = QThread()
         self.worker = ResearchWorker(query, academic)
@@ -805,7 +795,7 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def on_research_failed(self, error: str) -> None:
-        self.add_message("assistant", "\u26a0\ufe0f " + error)
+        self.add_message("assistant", "⚠️ " + error)
         self.set_busy(False)
 
     def handle_agent_plan_request(self, text: str) -> bool:
@@ -830,12 +820,12 @@ class MainWindow(QMainWindow):
             return False
 
         source_mode = "local"
-        if "أكاديمي" in text or "أكاديمياً" in text:
+        if "كليهما" in text or "كلاهما" in text:
+            source_mode = "both"
+        elif "أكاديمي" in text or "أكاديمياً" in text:
             source_mode = "academic"
         elif "الويب" in text or "ويب" in text:
             source_mode = "web"
-        elif "كليهما" in text or "كلاهما" in text:
-            source_mode = "both"
 
         self.pending_plan = self.agent.plan(text, source_mode)
         self.add_message("assistant", self.pending_plan.as_text())
@@ -855,7 +845,6 @@ class MainWindow(QMainWindow):
     def on_answer_finished(self, answer: str) -> None:
         if answer:
             self.db.add_message("assistant", answer)
-
             try:
                 if self.memory_service.should_learn_answer(answer):
                     self.memory_service.learn_verified_answer(
@@ -869,16 +858,14 @@ class MainWindow(QMainWindow):
                     str(exc),
                     status="warning",
                 )
-
             if self.speak_enabled:
                 self.speech.speak(answer)
-
         self.set_busy(False)
 
     @Slot(str)
     def on_answer_failed(self, error: str) -> None:
         if self.streaming_bubble:
-            self.streaming_bubble.update_text("\u26a0\ufe0f " + error)
+            self.streaming_bubble.update_text("⚠️ " + error)
         self.set_busy(False)
 
     def set_busy(self, busy: bool) -> None:
@@ -887,8 +874,10 @@ class MainWindow(QMainWindow):
         self.plus_button.setEnabled(not busy)
         self.send_button.setEnabled(not busy)
         can_voice = sd is not None and np is not None and WhisperModel is not None
-        self.voice_button.setEnabled(not busy and can_voice and not self.is_recording)
-        self.status_label.setText("\u25cf يفكر..." if busy else "\u25cf جاهز")
+        self.voice_button.setEnabled(
+            not busy and can_voice and not self.is_recording
+        )
+        self.status_label.setText("● يفكر..." if busy else "● جاهز")
 
     def toggle_voice_recording(self, checked: bool) -> None:
         if checked:
@@ -900,11 +889,13 @@ class MainWindow(QMainWindow):
         if self.busy:
             self.voice_button.setChecked(False)
             return
+
         self.is_recording = True
-        self.voice_button.setText("\u23f\ufe0f")
+        self.voice_button.setText("⏹️")
         self.voice_button.setToolTip("اضغط لإيقاف التسجيل والإرسال")
         self.send_button.setEnabled(False)
-        self.status_label.setText("\u25cf يسجل... اضغط \u23f\ufe0f للإيقاف")
+        self.status_label.setText("● يسجل... اضغط ⏹️ للإيقاف")
+
         self.voice_thread = QThread()
         self.voice_worker = VoiceWorker()
         self.voice_worker.moveToThread(self.voice_thread)
@@ -919,15 +910,19 @@ class MainWindow(QMainWindow):
     def stop_voice_recording(self) -> None:
         if self.voice_worker:
             self.voice_worker.request_stop()
-        self.status_label.setText("\u25cf جاري المعالجة الصوتية...")
+        self.status_label.setText("● جاري المعالجة الصوتية...")
 
+    @Slot(str)
     def on_voice_finished(self, text: str) -> None:
         self.is_recording = False
-        self.voice_button.setText("\U0001f3a4")
+        self.voice_button.setText("🎤")
         self.voice_button.setChecked(False)
-        self.voice_button.setToolTip("اضغط لبدء التسجيل، واضغط مرة أخرى للإيقاف والإرسال")
+        self.voice_button.setToolTip(
+            "اضغط لبدء التسجيل، واضغط مرة أخرى للإيقاف والإرسال"
+        )
         self.send_button.setEnabled(True)
-        self.status_label.setText("\u25cf جاهز")
+        self.status_label.setText("● جاهز")
+
         if text:
             self.input.setPlainText(text)
             self.input.adjust_height()
@@ -937,13 +932,17 @@ class MainWindow(QMainWindow):
             self.add_message("assistant", "لم أتعرف على كلام واضح.")
             self.set_busy(False)
 
+    @Slot(str)
     def on_voice_failed(self, error: str) -> None:
         self.is_recording = False
-        self.voice_button.setText("\U0001f3a4")
+        self.voice_button.setText("🎤")
         self.voice_button.setChecked(False)
+        self.voice_button.setToolTip(
+            "اضغط لبدء التسجيل، واضغط مرة أخرى للإيقاف والإرسال"
+        )
         self.send_button.setEnabled(True)
-        self.status_label.setText("\u25cf جاهز")
-        self.add_message("assistant", "\u26a0\ufe0f " + error)
+        self.status_label.setText("● جاهز")
+        self.add_message("assistant", "⚠️ " + error)
         self.set_busy(False)
 
     def toggle_speech(self, enabled: bool) -> None:
@@ -954,8 +953,7 @@ class MainWindow(QMainWindow):
         if not folder:
             return
         self.root = Path(folder).resolve()
-        if self.agent:
-            self.agent.set_root(self.root)
+        self.agent.set_root(self.root)
         self.workspace_label.setText(str(self.root))
         self.add_message("assistant", f"تم اختيار مساحة العمل: `{self.root}`")
 
@@ -969,10 +967,8 @@ class MainWindow(QMainWindow):
     def new_chat(self) -> None:
         self.messages.clear()
         self.db.clear_history()
-        self.add_message(
-            "assistant",
-            "بدأت محادثة جديدة. كيف أساعدك؟",
-        )
+        self.current_user_query = ""
+        self.add_message("assistant", "بدأت محادثة جديدة. كيف أساعدك؟")
 
 
 STYLE = """
