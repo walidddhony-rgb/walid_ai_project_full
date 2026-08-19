@@ -1,3 +1,4 @@
+"""Permission persistence and workspace scope validation."""
 from __future__ import annotations
 
 import sqlite3
@@ -6,16 +7,17 @@ from pathlib import Path
 
 
 class PermissionManager:
-    def __init__(self, db_path: Path):
-        self.db_path = db_path
+    """Stores user grants and validates permission scope."""
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
+    def _connect(self) -> sqlite3.Connection:
+        return sqlite3.connect(self.db_path)
 
-    def _init_schema(self):
+    def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.execute(
                 """
@@ -26,14 +28,29 @@ class PermissionManager:
                     mode TEXT NOT NULL DEFAULT 'once',
                     granted_at TEXT NOT NULL,
                     expires_at TEXT,
-                    revoked INTEGER DEFAULT 0
+                    revoked INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
 
-    def grant(self, permission: str, scope: str, mode: str = "once", hours: int = 1):
+    def grant(
+        self,
+        permission: str,
+        scope: str = "*",
+        mode: str = "once",
+        hours: int = 1,
+    ) -> None:
+        if mode not in {"once", "session", "persistent"}:
+            raise ValueError(f"Unsupported permission mode: {mode}")
+
         now = datetime.now()
-        expires = now + timedelta(hours=hours) if mode == "session" else None
+        expires_at = None
+
+        if mode == "once":
+            expires_at = now + timedelta(minutes=10)
+        elif mode == "session":
+            expires_at = now + timedelta(hours=hours)
+
         with self._connect() as conn:
             conn.execute(
                 """
@@ -46,35 +63,50 @@ class PermissionManager:
                     scope,
                     mode,
                     now.isoformat(),
-                    expires.isoformat() if expires else None,
+                    expires_at.isoformat() if expires_at else None,
                 ),
             )
 
-    def allowed(self, permission: str, scope: str) -> bool:
+    def allowed(self, permission: str, scope: str = "*") -> bool:
         now = datetime.now().isoformat()
+
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT * FROM permissions
-                WHERE permission = ? AND revoked = 0
+                SELECT scope, expires_at
+                FROM permissions
+                WHERE permission = ?
+                  AND revoked = 0
                 ORDER BY id DESC
                 """,
                 (permission,),
             ).fetchall()
-        for row in rows:
-            if row["scope"] != "*" and not scope.startswith(row["scope"]):
+
+        for saved_scope, expires_at in rows:
+            if expires_at and expires_at < now:
                 continue
-            if row["expires_at"] and row["expires_at"] < now:
-                continue
-            return True
+
+            if saved_scope == "*":
+                return True
+
+            if scope.startswith(saved_scope):
+                return True
+
         return False
 
-    def revoke_all(self, permission: str | None = None):
+    def revoke(self, permission: str, scope: str = "*") -> None:
         with self._connect() as conn:
-            if permission:
-                conn.execute(
-                    "UPDATE permissions SET revoked=1 WHERE permission=?",
-                    (permission,),
-                )
-            else:
-                conn.execute("UPDATE permissions SET revoked=1")
+            conn.execute(
+                """
+                UPDATE permissions
+                SET revoked = 1
+                WHERE permission = ?
+                  AND scope = ?
+                  AND revoked = 0
+                """,
+                (permission, scope),
+            )
+
+    def revoke_all(self) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE permissions SET revoked = 1")
