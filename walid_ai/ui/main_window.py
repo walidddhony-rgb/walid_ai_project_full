@@ -927,7 +927,6 @@ class MainWindow(QMainWindow):
             self.input.setPlainText(text)
             self.input.adjust_height()
             self.set_busy(False)
-            self.send_message()
         else:
             self.add_message("assistant", "لم أتعرف على كلام واضح.")
             self.set_busy(False)
